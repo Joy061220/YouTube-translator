@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Content script load test</title>
+<pre id="results">Running…</pre>
+<script>
+  "use strict";
+  window.contentLoadErrors = [];
+  window.addEventListener("error", (event) => {
+    window.contentLoadErrors.push(event.message || "Unknown script error");
+  });
+  window.chrome = window.chrome || {};
+  window.chrome.runtime = {
+    onMessage: { addListener() {} },
+    sendMessage: async () => ({ ok: true, data: {} })
+  };
+</script>
+<script src="../extension/caption-assembler.js"></script>
+<script src="../extension/content.js"></script>
+<script>
+  setTimeout(() => {
+    const failures = [...window.contentLoadErrors];
+    if (!window.__youtubeCaptionTranslatorLoaded) failures.push("Content script did not initialize");
+    document.documentElement.dataset.failures = String(failures.length);
+    document.querySelector("#results").textContent = failures.length
+      ? `FAIL\n${failures.join("\n")}`
+      : "PASS content script initializes without top-level errors";
+  }, 100);
+</script>

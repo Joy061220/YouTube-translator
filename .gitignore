@@ -1,0 +1,5 @@
+local_server/.env.local
+__pycache__/
+*.py[cod]
+.coverage
+

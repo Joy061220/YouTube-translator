@@ -1,0 +1,168 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Caption assembler tests</title>
+<pre id="results">Running…</pre>
+<script src="../extension/caption-assembler.js"></script>
+<script>
+  "use strict";
+
+  const output = [];
+  let failures = 0;
+
+  function equal(actual, expected, label) {
+    if (actual !== expected) {
+      failures += 1;
+      output.push(`FAIL ${label}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`);
+      return;
+    }
+    output.push(`PASS ${label}`);
+  }
+
+  function bufferAfter(...snapshots) {
+    const buffer = new CaptionSentenceAssembler.SentenceBuffer();
+    let update = null;
+    for (const snapshot of snapshots) update = buffer.push(snapshot);
+    return { buffer, update };
+  }
+
+  {
+    const { buffer } = bufferAfter("I", "I think", "I think this works.");
+    equal(buffer.activeText, "I think this works.", "progressive captions keep the longest version");
+  }
+
+  {
+    const { buffer } = bufferAfter("we need to solve", "to solve this problem.");
+    equal(buffer.activeText, "we need to solve this problem.", "rolling captions merge word overlap once");
+  }
+
+  {
+    const { buffer } = bufferAfter("This is", "a complete sentence.");
+    equal(buffer.activeText, "This is a complete sentence.", "separate non-overlapping blocks form one sentence");
+  }
+
+  {
+    const buffer = new CaptionSentenceAssembler.SentenceBuffer();
+    buffer.push("Hello");
+    buffer.push("Hello.");
+    const update = buffer.push("Hello. How are");
+    equal(update.completed[0], "Hello.", "new sentence closes the previous sentence");
+    equal(update.active, "How are", "new sentence is not appended to the completed one");
+  }
+
+  {
+    const buffer = new CaptionSentenceAssembler.SentenceBuffer();
+    buffer.push("Hello. How are");
+    const update = buffer.push("Hello. How are you?");
+    equal(update.completed.length, 0, "old visible sentence is not completed twice");
+    equal(update.active, "How are you?", "carry-over prefix does not reappear in the active sentence");
+  }
+
+  {
+    const visible = "name. We're launching a new cookie for my small business, the Kevin Cookie Company. So, for this,";
+    equal(
+      CaptionSentenceAssembler.latestCompleteSentence(visible),
+      "We're launching a new cookie for my small business, the Kevin Cookie Company.",
+      "latest complete sentence wins over trailing incomplete caption"
+    );
+  }
+
+  {
+    equal(
+      CaptionSentenceAssembler.latestCompleteSentence("First complete. Second complete."),
+      "Second complete.",
+      "latest sentence wins when all visible sentences are complete"
+    );
+  }
+
+  {
+    equal(
+      CaptionSentenceAssembler.latestCompleteSentence("Only an incomplete caption, so"),
+      "",
+      "an incomplete-only caption keeps collecting"
+    );
+  }
+
+  {
+    const buffer = new CaptionSentenceAssembler.SentenceBuffer();
+    buffer.push("Hello world.");
+    const update = buffer.push("world. How are you");
+    equal(update.completed[0], "Hello world.", "rolling boundary completes the prior sentence without duplication");
+    equal(update.active, "How are you", "rolling boundary keeps only the next sentence tail");
+  }
+
+  {
+    const { buffer, update } = bufferAfter("I go.", "I go home.");
+    equal(update.completed.length, 0, "fast punctuation correction remains the same sentence");
+    equal(buffer.activeText, "I go home.", "punctuation correction replaces the premature version");
+  }
+
+  {
+    const { buffer } = bufferAfter("我们需要解决", "解决这个问题。");
+    equal(buffer.activeText, "我们需要解决这个问题。", "CJK rolling captions merge without spaces or duplicates");
+  }
+
+  {
+    const delay = CaptionSentenceAssembler.captionSettleDelay("A complete sentence.", {
+      now: 5000,
+      lastChangedAt: 4000,
+      startedAt: 5000,
+      sentenceEndSettleMs: 700,
+      noPunctuationSettleMs: 2500,
+      maxCollectionMs: 6000
+    });
+    equal(delay, 0, "caption stability before the click is reused");
+  }
+
+  {
+    const delay = CaptionSentenceAssembler.captionSettleDelay("still speaking", {
+      now: 5000,
+      lastChangedAt: 2600,
+      startedAt: 5000,
+      sentenceEndSettleMs: 700,
+      noPunctuationSettleMs: 2500,
+      maxCollectionMs: 6000
+    });
+    equal(delay, 100, "only the remaining no-punctuation settle time is waited");
+  }
+
+  {
+    const delay = CaptionSentenceAssembler.captionSettleDelay("still speaking", {
+      now: 7000,
+      lastChangedAt: 7000,
+      startedAt: 1000,
+      sentenceEndSettleMs: 700,
+      noPunctuationSettleMs: 2500,
+      maxCollectionMs: 6000
+    });
+    equal(delay, 0, "maximum collection time still ends the wait");
+  }
+
+  {
+    const delay = CaptionSentenceAssembler.captionCompletionDelay("More reliable, more convenient, and most", {
+      now: 5000,
+      lastChangedAt: 2000,
+      startedAt: 4000,
+      blankSince: null,
+      sentenceEndSettleMs: 250,
+      blankSettleMs: 900,
+      maxCollectionMs: 8000
+    });
+    equal(delay, 7000, "stable caption fragments do not end before the sentence does");
+  }
+
+  {
+    const delay = CaptionSentenceAssembler.captionCompletionDelay("A caption without punctuation", {
+      now: 5000,
+      lastChangedAt: 4500,
+      startedAt: 2000,
+      blankSince: 4100,
+      sentenceEndSettleMs: 250,
+      blankSettleMs: 900,
+      maxCollectionMs: 8000
+    });
+    equal(delay, 0, "a real blank caption gap ends an unpunctuated sentence");
+  }
+
+  document.documentElement.dataset.failures = String(failures);
+  document.querySelector("#results").textContent = `${output.join("\n")}\n\n${failures ? `${failures} failed` : "All tests passed"}`;
+</script>
