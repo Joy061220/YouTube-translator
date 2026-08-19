@@ -16,6 +16,9 @@
   const MAX_TRANSLATION_CACHE = 64;
   const MAX_TRACKED_CAPTION_CHARS = 520;
   const TIMELINE_CHANNEL = "youtube-caption-translator-timeline-v1";
+  const BACKGROUND_OPACITY_KEY = "translationBackgroundOpacity";
+  const TEXT_OPACITY_KEY = "translationTextOpacity";
+  const TEXT_COLOR_KEY = "translationTextColor";
   const completedCaptions = [];
   const translationCache = new Map();
   const pendingTimelineRequests = new Map();
@@ -31,6 +34,12 @@
   let captionBlankSince = null;
   let timelinePrefetchedVideoId = "";
   let retryAction = "translate";
+  let backgroundOpacity = CaptionDisplaySettings.DEFAULT_BACKGROUND_OPACITY;
+  let backgroundOpacityRevision = 0;
+  let textOpacity = CaptionDisplaySettings.DEFAULT_TEXT_OPACITY;
+  let textOpacityRevision = 0;
+  let textColor = CaptionDisplaySettings.DEFAULT_TEXT_COLOR;
+  let textColorRevision = 0;
 
   const normalizeText = CaptionSentenceAssembler.normalizeText;
 
@@ -93,7 +102,10 @@
   }
 
   function isWatchPage() {
-    return location.hostname === "www.youtube.com" && location.pathname === "/watch";
+    return (
+      (location.hostname === "www.youtube.com" && location.pathname === "/watch") ||
+      window.__youtubeCaptionTranslatorTestWatchPage === true
+    );
   }
 
   function isVisible(element) {
@@ -225,6 +237,103 @@
     });
   }
 
+  function applyBackgroundOpacity(value) {
+    backgroundOpacity = CaptionDisplaySettings.normalizeBackgroundOpacity(value);
+    if (!ui) return;
+    ui.panel.style.setProperty(
+      "--translation-background-opacity",
+      String(CaptionDisplaySettings.backgroundOpacityFraction(backgroundOpacity))
+    );
+    ui.backgroundOpacitySlider.value = String(backgroundOpacity);
+    ui.backgroundOpacityValue.textContent = `${backgroundOpacity}%`;
+  }
+
+  function applyTextOpacity(value) {
+    textOpacity = CaptionDisplaySettings.normalizeTextOpacity(value);
+    if (!ui) return;
+    ui.panel.style.setProperty(
+      "--translation-text-opacity",
+      String(CaptionDisplaySettings.textOpacityFraction(textOpacity))
+    );
+    ui.textOpacitySlider.value = String(textOpacity);
+    ui.textOpacityValue.textContent = `${textOpacity}%`;
+  }
+
+  function applyTextColor(value) {
+    textColor = CaptionDisplaySettings.normalizeTextColor(value);
+    if (!ui) return;
+    ui.panel.style.setProperty("--translation-text-color", textColor);
+    for (const option of ui.textColorOptions) {
+      const selected = option.dataset.color === textColor;
+      option.classList.toggle("selected", selected);
+      option.setAttribute("aria-checked", String(selected));
+    }
+  }
+
+  function persistDisplaySetting(key, value) {
+    try {
+      const result = chrome.storage?.local?.set?.({ [key]: value });
+      result?.catch?.(() => {});
+    } catch {
+      // The setting still applies to this page if the extension was reloaded mid-session.
+    }
+  }
+
+  function saveBackgroundOpacity(value) {
+    backgroundOpacityRevision += 1;
+    applyBackgroundOpacity(value);
+    persistDisplaySetting(BACKGROUND_OPACITY_KEY, backgroundOpacity);
+  }
+
+  function saveTextOpacity(value) {
+    textOpacityRevision += 1;
+    applyTextOpacity(value);
+    persistDisplaySetting(TEXT_OPACITY_KEY, textOpacity);
+  }
+
+  function saveTextColor(value) {
+    textColorRevision += 1;
+    applyTextColor(value);
+    persistDisplaySetting(TEXT_COLOR_KEY, textColor);
+  }
+
+  async function loadDisplaySettings() {
+    const revisionsAtStart = {
+      backgroundOpacity: backgroundOpacityRevision,
+      textOpacity: textOpacityRevision,
+      textColor: textColorRevision
+    };
+    try {
+      const stored = await chrome.storage?.local?.get?.([
+        BACKGROUND_OPACITY_KEY,
+        TEXT_OPACITY_KEY,
+        TEXT_COLOR_KEY
+      ]);
+      if (
+        backgroundOpacityRevision === revisionsAtStart.backgroundOpacity &&
+        stored?.[BACKGROUND_OPACITY_KEY] != null
+      ) {
+        applyBackgroundOpacity(stored[BACKGROUND_OPACITY_KEY]);
+      }
+      if (textOpacityRevision === revisionsAtStart.textOpacity && stored?.[TEXT_OPACITY_KEY] != null) {
+        applyTextOpacity(stored[TEXT_OPACITY_KEY]);
+      }
+      if (textColorRevision === revisionsAtStart.textColor && stored?.[TEXT_COLOR_KEY] != null) {
+        applyTextColor(stored[TEXT_COLOR_KEY]);
+      }
+    } catch {
+      // Keep the current defaults when storage is unavailable.
+    }
+  }
+
+  function setSettingsOpen(open) {
+    if (!ui) return;
+    ui.settingsPanel.hidden = !open;
+    ui.settingsButton.setAttribute("aria-expanded", String(open));
+    ui.settingsButton.setAttribute("aria-label", open ? "关闭翻译显示设置" : "打开翻译显示设置");
+    if (open) ui.settingsClose.focus();
+  }
+
   function createUi(player) {
     uiHost = document.createElement("div");
     uiHost.id = UI_HOST_ID;
@@ -232,6 +341,10 @@
     player.appendChild(uiHost);
 
     const shadow = uiHost.attachShadow({ mode: "open" });
+    const colorOptionsMarkup = CaptionDisplaySettings.TEXT_COLOR_PRESETS.map((preset) => `
+      <button class="color-option" type="button" role="radio" aria-checked="false"
+        aria-label="${preset.label}" title="${preset.label}" data-color="${preset.value}"
+        style="--swatch-color: ${preset.value}"><span></span></button>`).join("");
     shadow.innerHTML = `
       <style>
         :host { position: absolute; inset: 0; z-index: 2147483000; pointer-events: none; font-family: Arial, "Microsoft YaHei", sans-serif; }
@@ -245,11 +358,19 @@
           transition: transform .15s ease, background .15s ease;
         }
         .translate-button:hover { background: #1677ff; transform: translateY(-50%) scale(1.06); }
-        .translate-button:focus-visible, .icon-button:focus-visible, .retry:focus-visible, .word:focus-visible { outline: 3px solid #7db5ff; outline-offset: 2px; }
+        .settings-button {
+          position: absolute; top: 12px; right: 12px; z-index: 4; display: grid; place-items: center;
+          width: 36px; height: 36px; border: 1px solid rgba(255,255,255,.32); border-radius: 10px;
+          color: #fff; background: rgba(15,18,24,.86); box-shadow: 0 5px 18px rgba(0,0,0,.35);
+          cursor: pointer; pointer-events: auto; font-family: "Segoe UI Symbol", Arial, sans-serif; font-size: 20px; line-height: 1;
+          transition: background .15s ease, transform .15s ease;
+        }
+        .settings-button:hover, .settings-button[aria-expanded="true"] { background: #1677ff; transform: scale(1.05); }
+        .translate-button:focus-visible, .settings-button:focus-visible, .icon-button:focus-visible, .retry:focus-visible, .word:focus-visible, .setting-slider:focus-visible, .color-option:focus-visible { outline: 3px solid #7db5ff; outline-offset: 2px; }
         .panel {
-          position: absolute; top: 16px; right: 16px; width: min(380px, calc(100% - 32px)); max-height: calc(100% - 32px);
+          position: absolute; top: 16px; right: 56px; z-index: 1; width: min(380px, calc(100% - 72px)); max-height: calc(100% - 32px);
           overflow: auto; border: 1px solid rgba(255,255,255,.16); border-radius: 14px; color: #f7f8fa;
-          background: rgba(17,20,27,.96); box-shadow: 0 16px 45px rgba(0,0,0,.45); pointer-events: auto;
+          background: rgba(17,20,27,var(--translation-background-opacity, .96)); box-shadow: 0 16px 45px rgba(0,0,0,.45); pointer-events: auto;
         }
         .panel[hidden] { display: none; }
         .header { display: flex; align-items: center; justify-content: space-between; min-height: 46px; padding: 0 10px 0 15px; border-bottom: 1px solid rgba(255,255,255,.1); cursor: grab; user-select: none; }
@@ -257,6 +378,25 @@
         .title { font-size: 14px; font-weight: 700; letter-spacing: .02em; }
         .icon-button { width: 32px; height: 32px; border: 0; border-radius: 8px; color: #d7dae0; background: transparent; cursor: pointer; font-size: 22px; line-height: 1; }
         .icon-button:hover { background: rgba(255,255,255,.1); }
+        .settings-panel {
+          position: absolute; top: 56px; right: 12px; z-index: 3; width: min(310px, calc(100% - 24px)); max-height: calc(100% - 68px);
+          overflow: auto; border: 1px solid rgba(255,255,255,.18); border-radius: 14px; color: #f7f8fa;
+          background: rgba(17,20,27,.98); box-shadow: 0 16px 45px rgba(0,0,0,.5); pointer-events: auto;
+        }
+        .settings-panel[hidden] { display: none; }
+        .settings-header { display: flex; align-items: center; justify-content: space-between; min-height: 45px; padding: 0 9px 0 14px; border-bottom: 1px solid rgba(255,255,255,.1); }
+        .settings-title { font-size: 14px; font-weight: 700; }
+        .settings-body { padding: 13px 14px 15px; }
+        .setting-group + .setting-group { margin-top: 14px; padding-top: 13px; border-top: 1px solid rgba(255,255,255,.1); }
+        .setting-label-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: #e7e9ed; font-size: 12px; }
+        .setting-value { min-width: 34px; color: #aeb6c3; font-variant-numeric: tabular-nums; text-align: right; }
+        .setting-slider { display: block; width: 100%; height: 24px; margin: 0; accent-color: #62a2ff; cursor: pointer; }
+        .setting-hint { margin: 5px 0 0; color: #89919e; font-size: 11px; line-height: 1.4; }
+        .color-options { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
+        .color-option { display: grid; place-items: center; aspect-ratio: 1; padding: 3px; border: 2px solid transparent; border-radius: 999px; background: transparent; cursor: pointer; }
+        .color-option span { width: 100%; height: 100%; border: 1px solid rgba(0,0,0,.28); border-radius: inherit; background: var(--swatch-color); box-shadow: 0 1px 5px rgba(0,0,0,.3); }
+        .color-option:hover { background: rgba(255,255,255,.1); }
+        .color-option.selected { border-color: #62a2ff; background: rgba(98,162,255,.16); }
         .body { padding: 14px 15px 16px; }
         .status { display: flex; align-items: center; gap: 9px; color: #c8ccd4; font-size: 13px; }
         .status.error { color: #ffb4b4; line-height: 1.55; }
@@ -265,12 +405,12 @@
         .result[hidden], .status[hidden] { display: none; }
         .section + .section { margin-top: 14px; padding-top: 13px; border-top: 1px solid rgba(255,255,255,.09); }
         .label { margin-bottom: 6px; color: #9fa6b2; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
-        .text { margin: 0; color: #f5f6f8; font-size: 15px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-        .translation { color: #fff; font-size: 18px; }
+        .text { margin: 0; color: var(--translation-text-color, #fff); opacity: var(--translation-text-opacity, 1); font-size: 15px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .translation { font-size: 18px; }
         .original { line-height: 1.9; }
         .notice { margin: 0 0 11px; padding: 8px 10px; border-radius: 8px; color: #ffd9a1; background: rgba(179,104,0,.22); font-size: 12px; line-height: 1.5; }
         .notice[hidden] { display: none; }
-        .word { display: inline; padding: 2px 1px; border: 0; border-radius: 4px; color: #8fc1ff; background: transparent; cursor: pointer; }
+        .word { display: inline; padding: 2px 1px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; text-decoration: underline dotted rgba(255,255,255,.45); text-underline-offset: 3px; }
         .word:hover { color: #fff; background: rgba(22,119,255,.55); }
         .word-hint { margin: 7px 0 0; color: #8f97a4; font-size: 12px; }
         .word-overlay { position: absolute; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(0,0,0,.58); pointer-events: auto; }
@@ -286,11 +426,36 @@
         .retry:hover { background: #4090ff; }
         @media (max-width: 520px), (max-height: 320px) {
           .translate-button { right: 8px; width: 36px; height: 36px; font-size: 12px; }
-          .panel { top: 8px; right: 8px; width: min(340px, calc(100% - 16px)); max-height: calc(100% - 16px); }
+          .settings-button { top: 8px; right: 8px; width: 32px; height: 32px; font-size: 18px; }
+          .panel { top: 8px; right: 48px; width: min(340px, calc(100% - 56px)); max-height: calc(100% - 16px); }
+          .settings-panel { top: 48px; right: 8px; width: min(300px, calc(100% - 16px)); max-height: calc(100% - 56px); }
           .body { padding: 10px 12px 12px; }
         }
       </style>
       <button class="translate-button" type="button" title="翻译当前字幕（Alt+Shift+T）" aria-label="翻译当前字幕">译</button>
+      <button class="settings-button" type="button" title="翻译显示设置" aria-label="打开翻译显示设置" aria-expanded="false" aria-controls="translation-display-settings">⚙</button>
+      <section class="settings-panel" id="translation-display-settings" role="dialog" aria-label="翻译显示设置" hidden>
+        <div class="settings-header">
+          <span class="settings-title">显示设置</span>
+          <button class="icon-button settings-close" type="button" aria-label="关闭设置">×</button>
+        </div>
+        <div class="settings-body">
+          <div class="setting-group">
+            <div class="setting-label-row"><label for="background-opacity">背景不透明度</label><output class="background-opacity-value setting-value">96%</output></div>
+            <input class="background-opacity-slider setting-slider" id="background-opacity" type="range" min="0" max="100" step="1">
+            <p class="setting-hint">数值越低，翻译浮窗背景越透明。</p>
+          </div>
+          <div class="setting-group">
+            <div class="setting-label-row"><label for="text-opacity">字体不透明度</label><output class="text-opacity-value setting-value">100%</output></div>
+            <input class="text-opacity-slider setting-slider" id="text-opacity" type="range" min="0" max="100" step="1">
+            <p class="setting-hint">只影响翻译浮窗中的原文和中文正文。</p>
+          </div>
+          <div class="setting-group">
+            <div class="setting-label-row"><span id="text-color-label">字体颜色</span></div>
+            <div class="color-options" role="radiogroup" aria-labelledby="text-color-label">${colorOptionsMarkup}</div>
+          </div>
+        </div>
+      </section>
       <section class="panel" role="dialog" aria-label="字幕翻译" hidden>
         <div class="header">
           <span class="title">字幕翻译</span>
@@ -300,7 +465,7 @@
           <div class="status"><span class="spinner"></span><span class="status-text">正在翻译…</span></div>
           <div class="result" hidden>
             <p class="notice" hidden></p>
-            <div class="section"><div class="label">原文</div><p class="text original"></p><p class="word-hint">点击蓝色单词查看详细解释</p></div>
+            <div class="section"><div class="label">原文</div><p class="text original"></p><p class="word-hint">点击原文中的单词查看详细解释</p></div>
             <div class="section"><div class="label">中文</div><p class="text translation"></p></div>
           </div>
           <button class="retry" type="button" hidden>再试一次</button>
@@ -321,9 +486,17 @@
 
     ui = {
       button: shadow.querySelector(".translate-button"),
+      settingsButton: shadow.querySelector(".settings-button"),
+      settingsPanel: shadow.querySelector(".settings-panel"),
+      settingsClose: shadow.querySelector(".settings-close"),
       panel: shadow.querySelector(".panel"),
       header: shadow.querySelector(".header"),
       close: shadow.querySelector(".close"),
+      backgroundOpacitySlider: shadow.querySelector(".background-opacity-slider"),
+      backgroundOpacityValue: shadow.querySelector(".background-opacity-value"),
+      textOpacitySlider: shadow.querySelector(".text-opacity-slider"),
+      textOpacityValue: shadow.querySelector(".text-opacity-value"),
+      textColorOptions: [...shadow.querySelectorAll(".color-option")],
       status: shadow.querySelector(".status"),
       statusText: shadow.querySelector(".status-text"),
       spinner: shadow.querySelector(".spinner"),
@@ -342,7 +515,27 @@
       wordDetails: shadow.querySelector(".word-details")
     };
 
+    applyBackgroundOpacity(backgroundOpacity);
+    applyTextOpacity(textOpacity);
+    applyTextColor(textColor);
+
     ui.button.addEventListener("click", () => translateCurrentCaption());
+    ui.settingsButton.addEventListener("click", () => setSettingsOpen(ui.settingsPanel.hidden));
+    ui.settingsClose.addEventListener("click", () => {
+      setSettingsOpen(false);
+      ui.settingsButton.focus();
+    });
+    ui.backgroundOpacitySlider.addEventListener("input", (event) => saveBackgroundOpacity(event.currentTarget.value));
+    ui.textOpacitySlider.addEventListener("input", (event) => saveTextOpacity(event.currentTarget.value));
+    for (const option of ui.textColorOptions) {
+      option.addEventListener("click", () => saveTextColor(option.dataset.color));
+    }
+    shadow.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !ui.settingsPanel.hidden) {
+        setSettingsOpen(false);
+        ui.settingsButton.focus();
+      }
+    });
     ui.retry.addEventListener("click", () => {
       if (retryAction === "reload") {
         location.reload();
@@ -371,7 +564,7 @@
     let drag = null;
 
     ui.header.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || event.target.closest("button")) {
+      if (event.button !== 0 || event.target.closest("button, input, label")) {
         return;
       }
       const panelRect = ui.panel.getBoundingClientRect();
@@ -799,6 +992,17 @@
     }
   });
 
+  chrome.storage?.onChanged?.addListener?.((changes, areaName) => {
+    if (areaName !== "local") return;
+    const backgroundChange = changes?.[BACKGROUND_OPACITY_KEY];
+    const textOpacityChange = changes?.[TEXT_OPACITY_KEY];
+    const textColorChange = changes?.[TEXT_COLOR_KEY];
+    if (backgroundChange?.newValue != null) applyBackgroundOpacity(backgroundChange.newValue);
+    if (textOpacityChange?.newValue != null) applyTextOpacity(textOpacityChange.newValue);
+    if (textColorChange?.newValue != null) applyTextColor(textColorChange.newValue);
+  });
+
+  loadDisplaySettings();
   ensureUi();
   scheduleCaptionScan();
 })();

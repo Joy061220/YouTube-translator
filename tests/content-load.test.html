@@ -1,28 +1,92 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Content script load test</title>
+<title>Content script settings UI test</title>
+<style>
+  body { margin: 0; padding: 24px; color: #fff; background: #0d0f14; font-family: Arial, sans-serif; }
+  #movie_player { position: relative; width: min(880px, calc(100vw - 48px)); aspect-ratio: 16 / 9; overflow: hidden; background: linear-gradient(135deg, #202735, #080a0f); }
+  #results { margin: 16px 0 0; white-space: pre-wrap; }
+</style>
+<div id="movie_player"></div>
 <pre id="results">Running…</pre>
 <script>
   "use strict";
+  window.__youtubeCaptionTranslatorTestWatchPage = true;
   window.contentLoadErrors = [];
+  window.storageWrites = [];
   window.addEventListener("error", (event) => {
     window.contentLoadErrors.push(event.message || "Unknown script error");
   });
   window.chrome = window.chrome || {};
   window.chrome.runtime = {
+    id: "content-load-test",
     onMessage: { addListener() {} },
     sendMessage: async () => ({ ok: true, data: {} })
   };
+  window.chrome.storage = {
+    local: {
+      get: async () => ({
+        translationBackgroundOpacity: 77,
+        translationTextOpacity: 84,
+        translationTextColor: "#c4b5fd"
+      }),
+      set: async (values) => window.storageWrites.push(values)
+    },
+    onChanged: { addListener() {} }
+  };
 </script>
 <script src="../extension/caption-assembler.js"></script>
+<script src="../extension/display-settings.js"></script>
 <script src="../extension/content.js"></script>
 <script>
   setTimeout(() => {
     const failures = [...window.contentLoadErrors];
+    const equal = (actual, expected, label) => {
+      if (actual !== expected) failures.push(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    };
     if (!window.__youtubeCaptionTranslatorLoaded) failures.push("Content script did not initialize");
+
+    const host = document.querySelector("#youtube-caption-translator-root");
+    const shadow = host?.shadowRoot;
+    if (!shadow) {
+      failures.push("Settings UI was not created");
+    } else {
+      const settingsButton = shadow.querySelector(".settings-button");
+      const settingsPanel = shadow.querySelector(".settings-panel");
+      equal(shadow.querySelector(".background-opacity-slider")?.value, "77", "saved background opacity loads");
+      equal(shadow.querySelector(".text-opacity-slider")?.value, "84", "saved text opacity loads");
+      equal(shadow.querySelector('[data-color="#c4b5fd"]')?.getAttribute("aria-checked"), "true", "saved text color loads");
+      settingsButton?.click();
+      equal(settingsPanel?.hidden, false, "settings panel opens");
+      equal(settingsButton?.getAttribute("aria-expanded"), "true", "settings button expanded state");
+
+      const backgroundSlider = shadow.querySelector(".background-opacity-slider");
+      backgroundSlider.value = "43";
+      backgroundSlider.dispatchEvent(new Event("input", { bubbles: true }));
+      equal(shadow.querySelector(".panel").style.getPropertyValue("--translation-background-opacity"), "0.43", "background opacity applies");
+      equal(shadow.querySelector(".background-opacity-value").textContent, "43%", "background opacity label updates");
+
+      const textSlider = shadow.querySelector(".text-opacity-slider");
+      textSlider.value = "61";
+      textSlider.dispatchEvent(new Event("input", { bubbles: true }));
+      equal(shadow.querySelector(".panel").style.getPropertyValue("--translation-text-opacity"), "0.61", "text opacity applies");
+      equal(shadow.querySelector(".text-opacity-value").textContent, "61%", "text opacity label updates");
+
+      const yellowOption = shadow.querySelector('[data-color="#ffe08a"]');
+      yellowOption?.click();
+      equal(shadow.querySelector(".panel").style.getPropertyValue("--translation-text-color"), "#ffe08a", "text color applies");
+      equal(yellowOption?.getAttribute("aria-checked"), "true", "selected color is announced");
+      equal(shadow.querySelectorAll(".color-option").length, 8, "eight color presets are available");
+      equal(window.storageWrites.length, 3, "all setting changes are persisted");
+
+      shadow.querySelector(".settings-close")?.click();
+      equal(settingsPanel?.hidden, true, "settings panel closes");
+      equal(shadow.activeElement, settingsButton, "focus returns to settings button");
+      settingsButton?.click();
+    }
+
     document.documentElement.dataset.failures = String(failures.length);
     document.querySelector("#results").textContent = failures.length
       ? `FAIL\n${failures.join("\n")}`
-      : "PASS content script initializes without top-level errors";
-  }, 100);
+      : "PASS settings panel, opacity controls, color presets, and persistence";
+  }, 150);
 </script>
