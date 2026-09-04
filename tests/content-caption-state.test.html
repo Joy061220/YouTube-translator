@@ -1,0 +1,85 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Content caption state regression test</title>
+<style>
+  #movie_player { position: relative; width: 800px; height: 450px; }
+  .ytp-caption-segment { display: inline; }
+</style>
+<div id="movie_player"><span class="ytp-caption-segment">The previous sentence is finished.</span></div>
+<pre id="results">Running…</pre>
+<script>
+  "use strict";
+
+  window.__youtubeCaptionTranslatorTestWatchPage = true;
+  window.translationRequests = [];
+  window.chrome = {
+    runtime: {
+      id: "caption-state-test",
+      onMessage: { addListener() {} },
+      sendMessage: async (message) => {
+        if (message.type !== "translate-caption") return { ok: true, data: {} };
+        window.translationRequests.push(message.payload);
+        return {
+          ok: true,
+          data: {
+            translation: message.payload.text.startsWith("The previous") ? "旧句译文" : "新句译文"
+          }
+        };
+      }
+    },
+    storage: {
+      local: { get: async () => ({}), set: async () => {} },
+      onChanged: { addListener() {} }
+    }
+  };
+</script>
+<script src="../extension/caption-assembler.js"></script>
+<script src="../extension/display-settings.js"></script>
+<script src="../extension/content.js"></script>
+<script>
+  "use strict";
+
+  const waitFor = async (predicate, timeoutMs = 2000) => {
+    const startedAt = performance.now();
+    while (!predicate()) {
+      if (performance.now() - startedAt > timeoutMs) throw new Error("Timed out waiting for translation");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  };
+
+  setTimeout(async () => {
+    const failures = [];
+    const equal = (actual, expected, label) => {
+      if (actual !== expected) {
+        failures.push(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+      }
+    };
+
+    try {
+      const host = document.querySelector("#youtube-caption-translator-root");
+      const shadow = host?.shadowRoot;
+      if (!shadow) throw new Error("Translation UI was not created");
+
+      shadow.querySelector(".translate-button").click();
+      await waitFor(() => window.translationRequests.length === 1);
+      equal(window.translationRequests[0].text, "The previous sentence is finished.", "first request");
+
+      document.querySelector(".ytp-caption-segment").textContent =
+        "sentence is finished. This is the new one.";
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      shadow.querySelector(".translate-button").click();
+      await waitFor(() => window.translationRequests.length === 2);
+
+      equal(window.translationRequests[1].text, "This is the new one.", "next request removes old sentence");
+      equal(shadow.querySelector(".original").textContent, "This is the new one.", "old original is replaced");
+      equal(shadow.querySelector(".translation").textContent, "新句译文", "old translation is replaced");
+    } catch (error) {
+      failures.push(error.message || String(error));
+    }
+
+    document.documentElement.dataset.failures = String(failures.length);
+    document.querySelector("#results").textContent = failures.length
+      ? `FAIL\n${failures.join("\n")}`
+      : "PASS translated sentence is consumed before the next request";
+  }, 100);
+</script>

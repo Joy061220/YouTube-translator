@@ -35,6 +35,48 @@ const timeline = require("../extension/page-caption-source.js");
 }
 
 {
+  const beginning = Array.from({ length: 90 }, (_, index) => `word${index}`).join(" ");
+  const ending = "the complete ending.";
+  const events = [
+    { tStartMs: 0, dDurationMs: 30000, segs: [{ utf8: beginning }] },
+    { tStartMs: 25000, dDurationMs: 10000, segs: [{ utf8: `${beginning.split(" ").slice(-4).join(" ")} ${ending}` }] }
+  ];
+  assert.equal(
+    timeline.buildCaptionAtTime(events, 10000, "word30 word31 word32"),
+    `${beginning} ${ending}`,
+    "a sentence longer than the old 520-character cap is not silently cropped"
+  );
+}
+
+{
+  const events = [
+    { tStartMs: 0, dDurationMs: 1800, segs: [{ utf8: "Earlier sentence." }] },
+    { tStartMs: 3000, dDurationMs: 1800, segs: [{ utf8: "This deliberately long sentence" }] },
+    { tStartMs: 10500, dDurationMs: 1800, segs: [{ utf8: "sentence continues after a long pause" }] },
+    { tStartMs: 21500, dDurationMs: 1800, segs: [{ utf8: "pause and extends beyond twelve seconds" }] },
+    { tStartMs: 32500, dDurationMs: 1800, segs: [{ utf8: "seconds before it finally ends here." }] },
+    { tStartMs: 36000, dDurationMs: 1800, segs: [{ utf8: "The next sentence starts." }] }
+  ];
+  assert.equal(
+    timeline.buildCaptionAtTime(events, 11000, "sentence continues after a long pause"),
+    "This deliberately long sentence continues after a long pause and extends beyond twelve seconds before it finally ends here."
+  );
+}
+
+{
+  const events = [
+    { tStartMs: 0, dDurationMs: 1800, segs: [{ utf8: "The same common phrase appears here." }] },
+    { tStartMs: 60000, dDurationMs: 1800, segs: [{ utf8: "A nearby sentence uses" }] },
+    { tStartMs: 61500, dDurationMs: 1800, segs: [{ utf8: "uses the same common phrase" }] },
+    { tStartMs: 63000, dDurationMs: 1800, segs: [{ utf8: "phrase in its own context." }] }
+  ];
+  assert.equal(
+    timeline.buildCaptionAtTime(events, 61500, "the same common phrase"),
+    "A nearby sentence uses the same common phrase in its own context."
+  );
+}
+
+{
   const events = [
     { tStartMs: 0, dDurationMs: 1800, segs: [{ utf8: "we need to" }] },
     { tStartMs: 1200, dDurationMs: 1800, segs: [{ utf8: "to solve this" }] },

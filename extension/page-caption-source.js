@@ -7,9 +7,9 @@
   const RESPONSE_TYPE = "timeline-caption-response";
   const SENTENCE_END_RE = /[.!?。！？…][.!?。！？…]*["'”’）)\]}]*$/u;
   const WORD_RE = /[\u3040-\u30ff\u3400-\u9fff]|[\p{L}\p{M}\p{N}]+(?:['’\-][\p{L}\p{M}\p{N}]+)*/gu;
-  const MAX_CUE_DISTANCE_MS = 12000;
-  const MAX_CUE_GAP_MS = 1600;
-  const MAX_SOURCE_CHARS = 520;
+  const MAX_FOCUS_DISTANCE_MS = 20000;
+  const MAX_BOUNDARY_SEARCH_MS = 90000;
+  const MAX_CUE_GAP_MS = 15000;
   const trackCache = new Map();
 
   function normalizeText(value) {
@@ -238,30 +238,31 @@
       sentenceEnd = afterStart + boundaryAfter.index + boundaryAfter[0].length;
     }
 
-    let sentence = normalizeText(source.slice(sentenceStart, sentenceEnd));
-    if (sentence.length <= MAX_SOURCE_CHARS) return sentence;
-    const relativeFocus = Math.max(0, focusAt - sentenceStart);
-    const half = Math.floor(MAX_SOURCE_CHARS / 2);
-    let cropStart = Math.max(0, relativeFocus - half);
-    let cropEnd = Math.min(sentence.length, cropStart + MAX_SOURCE_CHARS);
-    cropStart = Math.max(0, cropEnd - MAX_SOURCE_CHARS);
-    if (cropStart > 0) cropStart = sentence.indexOf(" ", cropStart) + 1 || cropStart;
-    if (cropEnd < sentence.length) cropEnd = sentence.lastIndexOf(" ", cropEnd) || cropEnd;
-    sentence = normalizeText(sentence.slice(cropStart, cropEnd));
-    return sentence;
+    return normalizeText(source.slice(sentenceStart, sentenceEnd));
   }
 
   function buildCaptionAtTime(events, currentTimeMs, currentText = "") {
     const cues = eventsToCues(events);
     if (!cues.length || !Number.isFinite(Number(currentTimeMs))) return "";
     const now = Number(currentTimeMs);
+    const nearbyCueIndexes = [];
+    for (let index = 0; index < cues.length; index += 1) {
+      const cue = cues[index];
+      const distance = cue.startMs <= now && cue.endMs >= now
+        ? 0
+        : Math.min(Math.abs(cue.startMs - now), Math.abs(cue.endMs - now));
+      if (distance <= MAX_FOCUS_DISTANCE_MS) nearbyCueIndexes.push(index);
+    }
+    const candidateIndexes = nearbyCueIndexes.length
+      ? nearbyCueIndexes
+      : cues.map((_, index) => index);
     let focusIndex = 0;
     let bestRank = -Infinity;
-    for (let index = 0; index < cues.length; index += 1) {
+    for (const index of candidateIndexes) {
       const cue = cues[index];
       const withinCue = cue.startMs <= now + 750 && cue.endMs >= now - 750;
       const distance = withinCue ? 0 : Math.min(Math.abs(cue.startMs - now), Math.abs(cue.endMs - now));
-      const rank = similarityScore(cue.text, currentText) * 100000 - distance;
+      const rank = similarityScore(cue.text, currentText) * 5000 - distance;
       if (rank > bestRank) {
         bestRank = rank;
         focusIndex = index;
@@ -273,22 +274,40 @@
       const previous = cues[left - 1];
       const current = cues[left];
       const gap = Math.max(0, current.startMs - previous.endMs);
-      if (gap > MAX_CUE_GAP_MS || cues[focusIndex].startMs - previous.startMs > MAX_CUE_DISTANCE_MS) break;
+      if (
+        gap > MAX_CUE_GAP_MS ||
+        cues[focusIndex].startMs - previous.startMs > MAX_BOUNDARY_SEARCH_MS
+      ) break;
       left -= 1;
-    }
-    let right = focusIndex;
-    while (right + 1 < cues.length) {
-      const current = cues[right];
-      const next = cues[right + 1];
-      const gap = Math.max(0, next.startMs - current.endMs);
-      if (gap > MAX_CUE_GAP_MS || next.startMs - cues[focusIndex].startMs > MAX_CUE_DISTANCE_MS) break;
-      right += 1;
+      // Include the boundary cue itself. For rolling captions it can also contain
+      // the missing beginning of the focused sentence; extractFocusedSentence
+      // removes it when it is genuinely the preceding sentence.
+      if (SENTENCE_END_RE.test(previous.text)) break;
     }
 
     let merged = "";
-    for (const cue of cues.slice(left, right + 1)) {
+    for (const cue of cues.slice(left, focusIndex + 1)) {
       merged = mergeCaptionText(merged, cue.text);
     }
+
+    let right = focusIndex;
+    while (right + 1 < cues.length) {
+      const focusedSentence = extractFocusedSentence(
+        merged,
+        currentText || cues[focusIndex].text
+      );
+      if (SENTENCE_END_RE.test(focusedSentence)) break;
+      const current = cues[right];
+      const next = cues[right + 1];
+      const gap = Math.max(0, next.startMs - current.endMs);
+      if (
+        gap > MAX_CUE_GAP_MS ||
+        next.startMs - cues[focusIndex].startMs > MAX_BOUNDARY_SEARCH_MS
+      ) break;
+      right += 1;
+      merged = mergeCaptionText(merged, next.text);
+    }
+
     return extractFocusedSentence(merged, currentText || cues[focusIndex].text);
   }
 

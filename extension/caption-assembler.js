@@ -341,6 +341,7 @@
     captionCompletionDelay,
     latestCompleteSentence,
     mergeCaptionText,
+    textAfterCompletedSentence,
     SentenceBuffer
   });
 

@@ -12,9 +12,9 @@
   const BLANK_CAPTION_SETTLE_MS = 900;
   const MAX_COLLECTION_MS = 8000;
   const CAPTION_BREAK_MS = 900;
-  const TIMELINE_CAPTION_TIMEOUT_MS = 450;
+  const TIMELINE_CAPTION_TIMEOUT_MS = 2500;
   const MAX_TRANSLATION_CACHE = 64;
-  const MAX_TRACKED_CAPTION_CHARS = 520;
+  const MAX_TRACKED_CAPTION_CHARS = 2000;
   const TIMELINE_CHANNEL = "youtube-caption-translator-timeline-v1";
   const BACKGROUND_OPACITY_KEY = "translationBackgroundOpacity";
   const TEXT_OPACITY_KEY = "translationTextOpacity";
@@ -34,6 +34,9 @@
   let captionBlankSince = null;
   let timelinePrefetchedVideoId = "";
   let retryAction = "translate";
+  let lastTranslatedCaption = "";
+  let lastTranslatedVideoId = "";
+  let lastTranslatedRawBlankSince = null;
   let backgroundOpacity = CaptionDisplaySettings.DEFAULT_BACKGROUND_OPACITY;
   let backgroundOpacityRevision = 0;
   let textOpacity = CaptionDisplaySettings.DEFAULT_TEXT_OPACITY;
@@ -130,6 +133,47 @@
     return normalizeText(parts.join(" "));
   }
 
+  function clearLastTranslatedCaption() {
+    lastTranslatedCaption = "";
+    lastTranslatedVideoId = "";
+    lastTranslatedRawBlankSince = null;
+  }
+
+  function captionAfterLastTranslation(caption, { forceRefresh = false } = {}) {
+    const current = normalizeText(caption);
+    if (forceRefresh || !lastTranslatedCaption) return current;
+    if (lastTranslatedVideoId !== currentVideoId()) {
+      clearLastTranslatedCaption();
+      return current;
+    }
+    if (!current) {
+      if (lastTranslatedRawBlankSince == null) lastTranslatedRawBlankSince = performance.now();
+      return "";
+    }
+    if (
+      lastTranslatedRawBlankSince != null &&
+      performance.now() - lastTranslatedRawBlankSince >= CAPTION_BREAK_MS
+    ) {
+      clearLastTranslatedCaption();
+      return current;
+    }
+    lastTranslatedRawBlankSince = null;
+    const remaining = CaptionSentenceAssembler.textAfterCompletedSentence(lastTranslatedCaption, current);
+    if (remaining === current) {
+      clearLastTranslatedCaption();
+    }
+    return remaining;
+  }
+
+  function markCaptionTranslated(caption) {
+    lastTranslatedCaption = normalizeText(caption);
+    lastTranslatedVideoId = currentVideoId();
+    lastTranslatedRawBlankSince = null;
+    captionTracker.reset();
+    lastTrackedCaption = "";
+    captionBlankSince = null;
+  }
+
   function rememberCompletedCaption(caption) {
     if (!caption || completedCaptions[completedCaptions.length - 1] === caption) {
       return;
@@ -156,7 +200,7 @@
 
   function scanCaption() {
     scanScheduled = false;
-    const caption = readVisibleCaption();
+    const caption = captionAfterLastTranslation(readVisibleCaption());
     const now = performance.now();
     if (!caption) {
       if (lastTrackedCaption && captionBlankSince == null) captionBlankSince = now;
@@ -854,9 +898,13 @@
       return;
     }
 
-    const current = readVisibleCaption();
+    const current = captionAfterLastTranslation(readVisibleCaption(), { forceRefresh });
     if (!current) {
-      showError("没有检测到当前字幕。请先开启 YouTube 字幕后再试。");
+      showError(
+        lastTranslatedCaption
+          ? "当前画面仍是刚翻译过的字幕。请继续播放到下一句后再试。"
+          : "没有检测到当前字幕。请先开启 YouTube 字幕后再试。"
+      );
       return;
     }
 
@@ -908,6 +956,7 @@
     const cacheKey = translationCacheKey(collected, context);
     const cached = forceRefresh ? null : readCachedTranslation(cacheKey);
     if (cached) {
+      markCaptionTranslated(collected);
       showResult(collected, cached, pauseNotice);
       reportTranslationTiming({ startedAt, captionReadyAt, requestStartedAt: null, captionSource, cacheHit: true, ok: true });
       return;
@@ -931,6 +980,7 @@
         throw new Error(response?.error || "翻译失败，请稍后再试。");
       }
       rememberTranslation(cacheKey, response.data);
+      markCaptionTranslated(collected);
       showResult(collected, response.data, pauseNotice);
       reportTranslationTiming({ startedAt, captionReadyAt, requestStartedAt, captionSource, cacheHit: false, ok: true });
     } catch (error) {
@@ -980,6 +1030,7 @@
     lastCaptionChangeAt = performance.now();
     captionBlankSince = null;
     timelinePrefetchedVideoId = "";
+    clearLastTranslatedCaption();
     requestSequence += 1;
     cancelCaptionCollection();
     ensureUi();

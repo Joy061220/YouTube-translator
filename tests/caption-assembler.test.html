@@ -83,6 +83,28 @@
   }
 
   {
+    equal(
+      CaptionSentenceAssembler.textAfterCompletedSentence(
+        "The previous sentence is finished.",
+        "sentence is finished. This is the new one"
+      ),
+      "This is the new one",
+      "a translated sentence left on screen is removed from the next caption"
+    );
+  }
+
+  {
+    equal(
+      CaptionSentenceAssembler.textAfterCompletedSentence(
+        "The previous sentence is finished.",
+        "A completely unrelated new caption"
+      ),
+      "A completely unrelated new caption",
+      "an unrelated new caption is preserved"
+    );
+  }
+
+  {
     const buffer = new CaptionSentenceAssembler.SentenceBuffer();
     buffer.push("Hello world.");
     const update = buffer.push("world. How are you");
