@@ -233,13 +233,19 @@
     return { completed, active: remaining };
   }
 
-  function latestCompleteSentence(value) {
-    const parts = splitEmbeddedSentences(value);
-    if (!parts.completed.length) return "";
-    if (parts.active && endsSentence(parts.active)) {
-      return parts.active;
+  function selectActiveSentence(snapshotValue, trackedValue = "") {
+    const visible = splitEmbeddedSentences(snapshotValue).active;
+    const tracked = splitEmbeddedSentences(trackedValue).active;
+    if (!visible) return "";
+    // Reuse the beginning collected before the click only when it belongs to
+    // the visible tail. A completed carry-over prefix is never the target.
+    if (tracked && (
+      comparable(tracked).includes(comparable(visible)) ||
+      overlapDetails(tracked, visible).size > 0
+    )) {
+      return mergeCaptionText(tracked, visible);
     }
-    return parts.completed[parts.completed.length - 1];
+    return visible;
   }
 
   function areCaptionVersions(leftValue, rightValue) {
@@ -293,26 +299,15 @@
 
       const visible = splitEmbeddedSentences(snapshot);
       if (visible.completed.length > 0) {
-        if (!this.activeText) {
-          completed.push(...visible.completed);
-          this.activeText = visible.active;
-        } else {
-          const newestVisibleCompletion = visible.completed[visible.completed.length - 1];
-          const completionMatchesActive = areCaptionVersions(this.activeText, newestVisibleCompletion);
-          const completionIsNew = !snapshotContainsSentence(this.lastSnapshot, newestVisibleCompletion);
-
-          if (completionMatchesActive || completionIsNew) {
-            for (const earlier of visible.completed.slice(0, -1)) {
-              if (!snapshotContainsSentence(this.lastSnapshot, earlier)) {
-                completed.push(earlier);
-              }
-            }
-            completed.push(mergeCaptionText(this.activeText, newestVisibleCompletion));
-            this.activeText = visible.active;
-          } else if (visible.active) {
-            this.activeText = mergeCaptionText(this.activeText, visible.active);
-          }
+        for (const sentence of visible.completed) {
+          if (
+            snapshotContainsSentence(this.lastSnapshot, sentence) &&
+            !areCaptionVersions(this.activeText, sentence)
+          ) continue;
+          completed.push(mergeCaptionText(this.activeText, sentence));
+          this.activeText = "";
         }
+        this.activeText = mergeCaptionText(this.activeText, visible.active);
       } else if (!this.activeText) {
         this.activeText = visible.active;
       } else if (endsSentence(this.activeText) && !isSameSentenceRevision(this.activeText, visible.active)) {
@@ -339,7 +334,7 @@
     endsSentence,
     captionSettleDelay,
     captionCompletionDelay,
-    latestCompleteSentence,
+    selectActiveSentence,
     mergeCaptionText,
     textAfterCompletedSentence,
     SentenceBuffer

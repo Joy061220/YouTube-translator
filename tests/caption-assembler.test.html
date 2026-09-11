@@ -60,15 +60,15 @@
   {
     const visible = "name. We're launching a new cookie for my small business, the Kevin Cookie Company. So, for this,";
     equal(
-      CaptionSentenceAssembler.latestCompleteSentence(visible),
-      "We're launching a new cookie for my small business, the Kevin Cookie Company.",
-      "latest complete sentence wins over trailing incomplete caption"
+      CaptionSentenceAssembler.selectActiveSentence(visible),
+      "So, for this,",
+      "new active sentence wins over completed carry-over captions"
     );
   }
 
   {
     equal(
-      CaptionSentenceAssembler.latestCompleteSentence("First complete. Second complete."),
+      CaptionSentenceAssembler.selectActiveSentence("First complete. Second complete."),
       "Second complete.",
       "latest sentence wins when all visible sentences are complete"
     );
@@ -76,10 +76,29 @@
 
   {
     equal(
-      CaptionSentenceAssembler.latestCompleteSentence("Only an incomplete caption, so"),
-      "",
-      "an incomplete-only caption keeps collecting"
+      CaptionSentenceAssembler.selectActiveSentence("Only an incomplete caption, so"),
+      "Only an incomplete caption, so",
+      "an incomplete-only caption remains the collection target"
     );
+  }
+
+  {
+    const visible = "obviously. And Apple's also quietly increased the prices of older iPhones";
+    const { buffer } = bufferAfter("Lower prices, obviously.", visible);
+    equal(CaptionSentenceAssembler.selectActiveSentence(visible, buffer.activeText),
+      "And Apple's also quietly increased the prices of older iPhones", "screenshot selects the new sentence");
+    equal(CaptionSentenceAssembler.selectActiveSentence("Obviously."), "Obviously.", "standalone short sentences are preserved");
+    equal(CaptionSentenceAssembler.selectActiveSentence("the prices of older iPhones", buffer.activeText),
+      "And Apple's also quietly increased the prices of older iPhones", "history restores the missing sentence beginning");
+    equal(CaptionSentenceAssembler.selectActiveSentence("A different scene", buffer.activeText),
+      "A different scene", "unrelated history is not joined to the selected sentence");
+  }
+
+  {
+    const { update } = bufferAfter("Old tail. The target sentence", "Old tail. The target sentence ends. A later sentence ends. Another start");
+    equal(update.completed[0], "The target sentence ends.", "batched updates finish the selected sentence first");
+    equal(update.completed[1], "A later sentence ends.", "later completions stay separate");
+    equal(update.active, "Another start", "tracker advances without merging completed sentences");
   }
 
   {

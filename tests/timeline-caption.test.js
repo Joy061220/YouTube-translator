@@ -112,4 +112,38 @@ and most importantly.`);
   assert.equal(events[0].segs[0].utf8, "More reliable & convenient.");
 }
 
+{
+  const visible = "obviously. And Apple's also quietly increased the prices of older iPhones";
+  const focus = "And Apple's also quietly increased the prices of older iPhones";
+  const full = `${focus} in some markets.`;
+  const events = [
+    { tStartMs: 0, dDurationMs: 2000, segs: [{ utf8: "Lower prices, obviously." }] },
+    { tStartMs: 2000, dDurationMs: 3000, segs: [{ utf8: visible }] },
+    { tStartMs: 5000, dDurationMs: 2000, segs: [{ utf8: "the prices of older iPhones in some markets. Another thought." }] }
+  ];
+  assert.equal(timeline.buildCaptionAtTime(events, 3500, focus, visible), full,
+    "screenshot target is completed without the old tail or following sentence");
+  assert.equal(timeline.buildCaptionAtTime(events, 3500, visible), full,
+    "a screen snapshot used as a focus also discards the carry-over prefix");
+}
+
+{
+  const events = [
+    { tStartMs: 1000, dDurationMs: 3000, segs: [{ utf8: "Obviously." }] },
+    { tStartMs: 4000, dDurationMs: 3000, segs: [{ utf8: "And Apple raised its prices." }] }
+  ];
+  assert.equal(timeline.buildCaptionAtTime(events, 3500, "And Apple raised", "Obviously. And Apple raised"),
+    "Obviously.", "a reliably timed future sentence does not displace the active sentence");
+  assert.equal(timeline.buildCaptionAtTime(events, 4000, "And Apple raised", "Obviously. And Apple raised"),
+    "And Apple raised its prices.", "at the new cue's start the target switches to the new sentence");
+  assert.equal(timeline.buildCaptionAtTime(events, 3500, "Obviously."), "Obviously.",
+    "a complete focus does not swallow the following sentence");
+  assert.equal(timeline.buildCaptionAtTime(events, 100000, "Obviously."), "",
+    "a distant repeated phrase is not selected after seeking");
+  assert.equal(timeline.extractFocusedSentence("An unrelated sentence.", "Completely absent words"), "",
+    "missing focus is not replaced by an arbitrary sentence");
+  assert.equal(timeline.extractFocusedSentence("We can now finish the revised sentence. Next thought.", "We can now finish the sentence."),
+    "We can now finish the revised sentence.", "a partial focus match still collects the full revised sentence");
+}
+
 console.log("All timeline caption tests passed");

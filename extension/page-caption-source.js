@@ -206,7 +206,7 @@
 
   function extractFocusedSentence(sourceValue, focusValue) {
     const source = normalizeText(sourceValue);
-    const focus = normalizeText(focusValue);
+    const focus = normalizeText(focusValue).split(/[.!?。！？…][.!?。！？…]*["'”’）)\]}]*\s+(?=\S)/u).pop();
     if (!source) return "";
     const sourceKey = source.toLocaleLowerCase();
     const focusKey = focus.toLocaleLowerCase();
@@ -221,8 +221,7 @@
       }
     }
     if (focusAt < 0) {
-      focusAt = Math.floor(source.length / 2);
-      focusLength = 0;
+      return "";
     }
 
     let sentenceStart = 0;
@@ -234,14 +233,16 @@
     let sentenceEnd = source.length;
     const afterStart = Math.min(source.length, focusAt + focusLength);
     const boundaryAfter = source.slice(afterStart).match(/[.!?。！？…][.!?。！？…]*["'”’）)\]}]*/u);
-    if (boundaryAfter) {
+    if (SENTENCE_END_RE.test(source.slice(focusAt, afterStart))) {
+      sentenceEnd = afterStart;
+    } else if (boundaryAfter) {
       sentenceEnd = afterStart + boundaryAfter.index + boundaryAfter[0].length;
     }
 
     return normalizeText(source.slice(sentenceStart, sentenceEnd));
   }
 
-  function buildCaptionAtTime(events, currentTimeMs, currentText = "") {
+  function buildCaptionAtTime(events, currentTimeMs, currentText = "", visibleText = currentText) {
     const cues = eventsToCues(events);
     if (!cues.length || !Number.isFinite(Number(currentTimeMs))) return "";
     const now = Number(currentTimeMs);
@@ -253,19 +254,36 @@
         : Math.min(Math.abs(cue.startMs - now), Math.abs(cue.endMs - now));
       if (distance <= MAX_FOCUS_DISTANCE_MS) nearbyCueIndexes.push(index);
     }
-    const candidateIndexes = nearbyCueIndexes.length
-      ? nearbyCueIndexes
-      : cues.map((_, index) => index);
+    if (!nearbyCueIndexes.length) return "";
+    const candidateIndexes = nearbyCueIndexes;
     let focusIndex = 0;
     let bestRank = -Infinity;
     for (const index of candidateIndexes) {
       const cue = cues[index];
-      const withinCue = cue.startMs <= now + 750 && cue.endMs >= now - 750;
+      const withinCue = cue.startMs <= now && cue.endMs > now;
       const distance = withinCue ? 0 : Math.min(Math.abs(cue.startMs - now), Math.abs(cue.endMs - now));
       const rank = similarityScore(cue.text, currentText) * 5000 - distance;
-      if (rank > bestRank) {
+      if (rank > bestRank || (rank === bestRank && cue.startMs <= now && cue.startMs > cues[focusIndex].startMs)) {
         bestRank = rank;
         focusIndex = index;
+      }
+    }
+
+    let focusText = currentText || cues[focusIndex].text;
+    // A new sentence may already be displayed before its timed cue starts.
+    // Override the screen candidate only when a currently active, completed
+    // cue also appears on screen. Coarse timings cannot resolve two sentences
+    // inside one cue, so leave those cases to the tracked screen candidate.
+    if (cues[focusIndex].startMs > now) {
+      const activeIndex = candidateIndexes.filter((index) => {
+        const cue = cues[index];
+        return cue.startMs <= now && cue.endMs > now &&
+          SENTENCE_END_RE.test(cue.text) &&
+          comparable(visibleText).includes(comparable(cue.text));
+      }).pop();
+      if (activeIndex != null) {
+        focusIndex = activeIndex;
+        focusText = cues[focusIndex].text;
       }
     }
 
@@ -294,7 +312,7 @@
     while (right + 1 < cues.length) {
       const focusedSentence = extractFocusedSentence(
         merged,
-        currentText || cues[focusIndex].text
+        focusText
       );
       if (SENTENCE_END_RE.test(focusedSentence)) break;
       const current = cues[right];
@@ -308,7 +326,7 @@
       merged = mergeCaptionText(merged, next.text);
     }
 
-    return extractFocusedSentence(merged, currentText || cues[focusIndex].text);
+    return extractFocusedSentence(merged, focusText);
   }
 
   function captionTrackName(track) {
@@ -421,13 +439,15 @@
   }
 
   async function getTimelineCaption(payload = {}) {
+    const identity = trackIdentity();
     const response = readPlayerResponse();
     const tracks = response?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     const track = selectCaptionTrack(tracks, readActiveTrack(), payload.currentText);
     if (!track) throw new Error("No timed caption track available");
     const events = await loadTrackEvents(track);
-    const text = buildCaptionAtTime(events, Number(payload.currentTimeMs), payload.currentText);
-    const confidence = similarityScore(text, payload.currentText);
+    if (identity !== trackIdentity()) throw new Error("Caption track changed during lookup");
+    const text = buildCaptionAtTime(events, Number(payload.currentTimeMs), payload.currentText, payload.visibleText);
+    const confidence = Math.max(similarityScore(text, payload.currentText), similarityScore(text, payload.visibleText));
     if (!text || (payload.currentText && confidence < 0.45)) {
       throw new Error("Timed caption track did not match the visible caption");
     }
@@ -455,6 +475,23 @@
 
   if (typeof window === "undefined" || root !== window || root.__youtubeCaptionTimelineBridgeLoaded) return;
   root.__youtubeCaptionTimelineBridgeLoaded = true;
+  let lastTrackIdentity = trackIdentity();
+  function trackIdentity() {
+    const track = readActiveTrack();
+    return JSON.stringify([
+      new URL(location.href).searchParams.get("v"),
+      track?.vssId, track?.languageCode, track?.kind,
+      track?.translationLanguage?.languageCode, track?.name
+    ]);
+  }
+  // Track selection belongs to the MAIN world. Notify the isolated content
+  // script so that a language change cannot reuse its old sentence history.
+  setInterval(() => {
+    const identity = trackIdentity();
+    if (identity === lastTrackIdentity) return;
+    lastTrackIdentity = identity;
+    root.postMessage({ channel: CHANNEL, type: "caption-track-changed" }, location.origin);
+  }, 500);
   root.addEventListener("message", (event) => {
     if (event.source !== root || event.origin !== location.origin || event.data?.channel !== CHANNEL) return;
     if (event.data.type === PREFETCH_TYPE) {

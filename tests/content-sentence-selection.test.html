@@ -1,0 +1,198 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sentence selection integration tests</title>
+<style>
+  #movie_player { position: relative; width: 900px; height: 400px; }
+  video { width: 100px; height: 60px; }
+  #results { white-space: pre-wrap; }
+</style>
+<div id="movie_player"><video></video><span class="ytp-caption-segment"></span></div>
+<pre id="results">Running…</pre>
+<script>
+  window.__youtubeCaptionTranslatorTestWatchPage = true;
+  const state = { time: 3.5, paused: false, seeking: false, timeline: () => null };
+  const requests = [];
+  const timelineRequests = [];
+  const failures = [];
+  const passed = [];
+  const video = document.querySelector("video");
+  Object.defineProperties(video, {
+    currentTime: { get: () => state.time },
+    paused: { get: () => state.paused },
+    seeking: { get: () => state.seeking }
+  });
+  video.pause = () => { state.paused = true; video.dispatchEvent(new Event("pause")); };
+  window.addEventListener("error", (event) => failures.push(event.message));
+  window.addEventListener("unhandledrejection", (event) => failures.push(String(event.reason)));
+  window.chrome = {
+    runtime: {
+      id: "sentence-selection-test", onMessage: { addListener() {} },
+      sendMessage: async (message) => {
+        if (message.type !== "translate-caption") return { ok: true, data: {} };
+        requests.push(message.payload);
+        return { ok: true, data: { translation: `译：${message.payload.text}` } };
+      }
+    },
+    storage: { local: { get: async () => ({}), set: async () => {} }, onChanged: { addListener() {} } }
+  };
+  window.addEventListener("message", async (event) => {
+    const message = event.data;
+    if (message?.type !== "request-timeline-caption") return;
+    timelineRequests.push(message.payload);
+    const data = await state.timeline(message.payload);
+    window.postMessage({ channel: message.channel, type: "timeline-caption-response",
+      requestId: message.requestId, ok: Boolean(data), data }, location.origin);
+  });
+</script>
+<script src="../extension/caption-assembler.js"></script>
+<script src="../extension/display-settings.js"></script>
+<script src="../extension/content.js"></script>
+<script>
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 40));
+  const waitFor = async (predicate, label) => {
+    const start = performance.now();
+    while (!predicate()) {
+      if (performance.now() - start > 4000) throw new Error(`Timed out: ${label}`);
+      await tick();
+    }
+  };
+  const equal = (actual, expected, label) => {
+    if (actual !== expected) throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  };
+  const caption = async (text) => {
+    document.querySelector(".ytp-caption-segment").textContent = text;
+    await tick();
+  };
+  const ui = () => document.querySelector("#youtube-caption-translator-root").shadowRoot;
+  const click = () => ui().querySelector(".translate-button").click();
+  const translated = async (text, count) => {
+    await waitFor(() => requests.length === count && ui().querySelector(".translation").textContent === `译：${text}`, text);
+    equal(requests[count - 1].text, text, "translation payload");
+    equal(ui().querySelector(".original").textContent, text, "original preview");
+  };
+  const test = async (name, run) => {
+    try {
+      document.dispatchEvent(new Event("yt-navigate-finish"));
+      requests.length = 0;
+      timelineRequests.length = 0;
+      Object.assign(state, { time: 3.5, paused: false, seeking: false, timeline: () => null });
+      await caption("");
+      await run();
+      passed.push(`PASS ${name}`);
+    } catch (error) { failures.push(`${name}: ${error.message}`); }
+  };
+  (async () => {
+    await tick();
+    await test("screenshot uses new sentence and click time", async () => {
+      const focus = "And Apple's also quietly increased the prices of older iPhones";
+      const full = `${focus} in some markets.`;
+      state.timeline = () => ({ text: full });
+      await caption(`obviously. ${focus}`);
+      click();
+      state.time = 8;
+      await translated(full, 1);
+      equal(timelineRequests[0].currentText, focus, "timeline focus excludes old tail");
+      equal(timelineRequests[0].currentTimeMs, 3500, "click timestamp is fixed");
+      equal(state.paused, true, "video pauses after completion");
+    });
+    await test("rolling fallback keeps target when multiple sentences arrive", async () => {
+      await caption("Old tail. The target sentence");
+      click();
+      await tick();
+      await caption("Old tail. The target sentence ends. A later sentence ends. Another start");
+      await translated("The target sentence ends.", 1);
+    });
+    await test("history restores the beginning without punctuation", async () => {
+      await caption("we need to solve");
+      await caption("to solve this problem");
+      click();
+      await tick();
+      await caption("this problem together.");
+      await translated("we need to solve this problem together.", 1);
+    });
+    await test("paused fallback labels incomplete fragments", async () => {
+      state.paused = true;
+      await caption("obviously. And Apple raised prices");
+      click();
+      await translated("And Apple raised prices", 1);
+      equal(ui().querySelector(".notice").textContent.includes("字幕片段"), true, "partial notice");
+    });
+    await test("standalone short sentence remains translatable", async () => {
+      await caption("Obviously.");
+      click();
+      await translated("Obviously.", 1);
+    });
+    await test("quick punctuation corrections can finish before translation", async () => {
+      await caption("I go.");
+      click();
+      await tick();
+      await caption("I go home.");
+      await translated("I go home.", 1);
+    });
+    await test("timeline can keep a sentence before the next cue starts", async () => {
+      state.timeline = () => ({ text: "Obviously." });
+      await caption("Obviously. And Apple raised");
+      click();
+      await translated("Obviously.", 1);
+    });
+    await test("older lookup cannot overwrite a newer click", async () => {
+      let release;
+      state.timeline = () => new Promise((resolve) => { release = resolve; });
+      await caption("Old tail. The target");
+      click();
+      await waitFor(() => release, "first lookup");
+      state.timeline = () => ({ text: "The target sentence ends." });
+      await caption("Old tail. The target sentence");
+      click();
+      await translated("The target sentence ends.", 1);
+      release({ text: "Stale response." });
+      await tick();
+      equal(requests.length, 1, "stale lookup sends no translation");
+      equal(ui().querySelector(".original").textContent, "The target sentence ends.", "stale lookup does not replace preview");
+    });
+    await test("seeking clears history and cancels pending lookup", async () => {
+      let release;
+      state.timeline = () => new Promise((resolve) => { release = resolve; });
+      await caption("Before the seek");
+      click();
+      await waitFor(() => release, "lookup before seek");
+      state.seeking = true;
+      video.dispatchEvent(new Event("seeking"));
+      state.time = 80;
+      await caption("Different words in another scene.");
+      state.seeking = false;
+      video.dispatchEvent(new Event("seeked"));
+      state.timeline = () => null;
+      click();
+      await translated("Different words in another scene.", 1);
+      release({ text: "Before the seek ends." });
+      await tick();
+      equal(requests.length, 1, "cancelled lookup is ignored");
+    });
+    await test("track change removes untranslated history", async () => {
+      await caption("Unfinished English words");
+      window.postMessage({ channel: "youtube-caption-translator-timeline-v1", type: "caption-track-changed" }, location.origin);
+      document.querySelector(".ytp-caption-segment").textContent = "新的字幕。";
+      await tick();
+      click();
+      await translated("新的字幕。", 1);
+    });
+    await test("pausing during collection translates the available fragment", async () => {
+      await caption("Old tail. Still speaking");
+      click();
+      await tick();
+      video.pause();
+      await translated("Still speaking", 1);
+    });
+    await test("blank gap finishes an unpunctuated sentence", async () => {
+      await caption("Old tail. words without punctuation");
+      click();
+      await tick();
+      await caption("");
+      await translated("words without punctuation", 1);
+    });
+    document.documentElement.dataset.failures = String(failures.length);
+    document.querySelector("#results").textContent = [...passed, ...failures.map((item) => `FAIL ${item}`),
+      `${passed.length} passed, ${failures.length} failed`].join("\n");
+  })();
+</script>

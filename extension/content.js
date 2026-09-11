@@ -37,6 +37,7 @@
   let lastTranslatedCaption = "";
   let lastTranslatedVideoId = "";
   let lastTranslatedRawBlankSince = null;
+  let observedVideo = null;
   let backgroundOpacity = CaptionDisplaySettings.DEFAULT_BACKGROUND_OPACITY;
   let backgroundOpacityRevision = 0;
   let textOpacity = CaptionDisplaySettings.DEFAULT_TEXT_OPACITY;
@@ -59,11 +60,16 @@
     if (
       event.source !== window ||
       event.origin !== location.origin ||
-      event.data?.channel !== TIMELINE_CHANNEL ||
-      event.data?.type !== "timeline-caption-response"
+      event.data?.channel !== TIMELINE_CHANNEL
     ) {
       return;
     }
+    if (event.data.type === "caption-track-changed") {
+      resetCaptionState();
+      scheduleCaptionScan();
+      return;
+    }
+    if (event.data.type !== "timeline-caption-response") return;
     const pending = pendingTimelineRequests.get(event.data.requestId);
     if (!pending) return;
     pendingTimelineRequests.delete(event.data.requestId);
@@ -71,7 +77,7 @@
     pending.resolve(event.data.ok ? event.data.data : null);
   });
 
-  async function requestTimelineCaption(currentText, currentTimeMs, timeoutMs = TIMELINE_CAPTION_TIMEOUT_MS) {
+  async function requestTimelineCaption(currentText, currentTimeMs, visibleText = currentText, timeoutMs = TIMELINE_CAPTION_TIMEOUT_MS) {
     if (!Number.isFinite(currentTimeMs) || !(await ensureTimelineBridge())) return null;
     return new Promise((resolve) => {
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -84,7 +90,7 @@
         channel: TIMELINE_CHANNEL,
         type: "request-timeline-caption",
         requestId,
-        payload: { currentText, currentTimeMs }
+        payload: { currentText, currentTimeMs, visibleText }
       }, location.origin);
     });
   }
@@ -137,6 +143,28 @@
     lastTranslatedCaption = "";
     lastTranslatedVideoId = "";
     lastTranslatedRawBlankSince = null;
+  }
+
+  function resetCaptionState() {
+    requestSequence += 1;
+    wordRequestSequence += 1;
+    cancelCaptionCollection();
+    for (const pending of pendingTimelineRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    pendingTimelineRequests.clear();
+    completedCaptions.length = 0;
+    captionTracker.reset();
+    lastTrackedCaption = "";
+    lastCaptionChangeAt = performance.now();
+    captionBlankSince = null;
+    timelinePrefetchedVideoId = "";
+    clearLastTranslatedCaption();
+    if (ui) {
+      ui.panel.hidden = true;
+      closeWordDialog();
+    }
   }
 
   function captionAfterLastTranslation(caption, { forceRefresh = false } = {}) {
@@ -200,6 +228,7 @@
 
   function scanCaption() {
     scanScheduled = false;
+    if (currentVideo()?.seeking) return;
     const caption = captionAfterLastTranslation(readVisibleCaption());
     const now = performance.now();
     if (!caption) {
@@ -813,6 +842,7 @@
         clearTimeout(collection.timer);
         resolve(normalizeText(text));
       };
+      collection.finish = () => finish(collection.text);
 
       const checkCompletion = () => {
         if (sequence !== requestSequence) {
@@ -851,7 +881,9 @@
         collection.blankSince = null;
         const update = collection.buffer.push(snapshotText);
         if (update.completed.length > 0) {
-          finish(update.completed[update.completed.length - 1]);
+          // Completions are chronological. Keep the sentence selected at the
+          // click even when one screen update also includes later sentences.
+          finish(update.completed[0]);
           return;
         }
         if (update.changed && update.active) {
@@ -890,11 +922,19 @@
   }
 
   async function translateCurrentCaption({ forceRefresh = false } = {}) {
+    ensureUi();
     const startedAt = performance.now();
     const sequence = ++requestSequence;
     cancelCaptionCollection();
     if (!isWatchPage()) {
       showError("请先打开一个 YouTube 视频播放页。");
+      return;
+    }
+
+    const video = currentVideo();
+    const clickedTimeMs = Number.isFinite(video?.currentTime) ? video.currentTime * 1000 : NaN;
+    if (video?.seeking) {
+      showError("正在跳转视频，请在字幕更新后再试。");
       return;
     }
 
@@ -908,31 +948,21 @@
       return;
     }
 
-    const visibleCompleteSentence = CaptionSentenceAssembler.latestCompleteSentence(current);
     const trackerUpdate = captionTracker.push(current);
     boundTrackedCaption();
     for (const completed of trackerUpdate.completed) {
       rememberCompletedCaption(completed);
     }
-    const initial = visibleCompleteSentence || captionTracker.activeText || trackerUpdate.active || current;
+    const initial = CaptionSentenceAssembler.selectActiveSentence(current, captionTracker.activeText);
     showCollecting(initial);
 
-    const video = currentVideo();
-    const fallbackCaptionPromise = visibleCompleteSentence
-      ? Promise.resolve(visibleCompleteSentence)
-      : video?.paused
+    const fallbackCaptionPromise = video?.paused
       ? Promise.resolve(normalizeText(initial))
       : collectCompleteCaption(initial, current, sequence);
-    const timelineCaption = visibleCompleteSentence
-      ? null
-      : await requestTimelineCaption(
-        current,
-        Number.isFinite(video?.currentTime) ? video.currentTime * 1000 : NaN
-      );
+    const timelineCaption = await requestTimelineCaption(initial, clickedTimeMs, current);
+    if (sequence !== requestSequence) return;
     let collected;
-    if (visibleCompleteSentence) {
-      collected = visibleCompleteSentence;
-    } else if (timelineCaption?.text) {
+    if (timelineCaption?.text) {
       cancelCaptionCollection();
       collected = timelineCaption.text;
       updateCollectingPreview(timelineCaption.text);
@@ -944,15 +974,14 @@
       return;
     }
     const captionReadyAt = performance.now();
-    const captionSource = visibleCompleteSentence
-      ? "visible-complete"
-      : timelineCaption?.text
-        ? "timeline"
-        : "screen";
+    const captionSource = timelineCaption?.text ? "timeline" : "screen";
 
     const context = contextFor(collected);
     rememberCompletedCaption(collected);
-    const pauseNotice = pauseCurrentVideo(video);
+    const partialNotice = !timelineCaption?.text && !CaptionSentenceAssembler.endsSentence(collected)
+      ? "未能确认完整句，当前翻译的是已收集的字幕片段。可继续播放后重试。"
+      : "";
+    const pauseNotice = [pauseCurrentVideo(video), partialNotice].filter(Boolean).join(" ");
     const cacheKey = translationCacheKey(collected, context);
     const cached = forceRefresh ? null : readCachedTranslation(cacheKey);
     if (cached) {
@@ -993,6 +1022,11 @@
   }
 
   function ensureUi() {
+    const video = currentVideo();
+    if (video !== observedVideo) {
+      observedVideo = video;
+      resetCaptionState();
+    }
     if (!isWatchPage()) {
       if (uiHost || activeCollection) {
         requestSequence += 1;
@@ -1023,18 +1057,23 @@
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
   document.addEventListener("yt-navigate-finish", () => {
-    completedCaptions.length = 0;
+    resetCaptionState();
     translationCache.clear();
-    captionTracker.reset();
-    lastTrackedCaption = "";
-    lastCaptionChangeAt = performance.now();
-    captionBlankSince = null;
-    timelinePrefetchedVideoId = "";
-    clearLastTranslatedCaption();
-    requestSequence += 1;
-    cancelCaptionCollection();
     ensureUi();
+    scheduleCaptionScan();
   });
+
+  for (const eventName of ["seeking", "emptied"]) {
+    document.addEventListener(eventName, (event) => {
+      if (event.target === currentVideo()) resetCaptionState();
+    }, true);
+  }
+  document.addEventListener("seeked", (event) => {
+    if (event.target === currentVideo()) scheduleCaptionScan();
+  }, true);
+  document.addEventListener("pause", (event) => {
+    if (event.target === currentVideo()) activeCollection?.finish();
+  }, true);
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === "translate-current-caption") {
