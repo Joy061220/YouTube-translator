@@ -10,7 +10,7 @@
 
 扩展会在当前句收集完成后暂停视频，方便阅读和查询单词；它不会自动恢复播放或跳转视频。字幕历史和翻译缓存只保留在当前页面内存中。它使用 YouTube 字幕时间轴和画面字幕，不包含语音识别功能。
 
-当前版本：**1.5.1**。修复滚动字幕中前一句末尾（例如 `obviously.`）抢占翻译目标的问题；连续点击、跳转视频和切换字幕轨道时，旧请求不会覆盖新的翻译。
+当前版本：**1.5.2**。修复视频开头的字幕语言、设置提示混入原文，导致滚动字幕多个版本重复堆积的问题；异常字幕历史会被丢弃，翻译前也会校验字幕内容。
 
 ## 一、准备 DeepSeek API Key
 
@@ -69,9 +69,9 @@
 
 ## 开发验证
 
-在项目根目录运行 `node tests/timeline-caption.test.js`、`node tests/timeline-bridge.test.js`、`node tests/display-settings.test.js` 和 `python -m unittest discover -s tests -p "test_*.py"`。
+在项目根目录运行 `node tests/caption-assembler.test.js`、`node tests/timeline-caption.test.js`、`node tests/timeline-bridge.test.js`、`node tests/display-settings.test.js` 和 `python -m unittest discover -s tests -p "test_*.py"`。
 
-浏览器回归测试：运行 `python -m http.server 8766 --bind 127.0.0.1`，在浏览器中打开 `http://127.0.0.1:8766/tests/` 下的四个 `.test.html` 页面。页面会显示测试结果；`content-sentence-selection.test.html` 覆盖滚动选句、时间固定、连续请求、跳转、换轨和暂停等场景，使用模拟字幕与翻译响应，不消耗 API 额度。
+浏览器回归测试：运行 `python -m http.server 8766 --bind 127.0.0.1`，在浏览器中打开 `http://127.0.0.1:8766/tests/` 下的五个 `.test.html` 页面。页面会显示测试结果；`caption-reader.test.html` 覆盖语言提示、嵌套提示、隐藏副本和正常对白，`content-sentence-selection.test.html` 覆盖滚动选句、时间固定、连续请求、跳转、换轨、暂停和字幕污染回退等场景，使用模拟字幕与翻译响应，不消耗 API 额度。
 
 ## 隐私与安全
 

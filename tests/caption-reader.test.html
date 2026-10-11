@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Caption reader regression tests</title>
+<div id="movie_player"></div>
+<div id="other-player"><div class="caption-window"><span class="ytp-caption-segment">Other video captions</span></div></div>
+<pre id="results">Running…</pre>
+<script src="../extension/caption-assembler.js"></script>
+<script src="../extension/caption-reader.js"></script>
+<script>
+  "use strict";
+  const player = document.querySelector("#movie_player");
+  const output = [];
+  let failures = 0;
+  function test(label, markup, expected) {
+    player.innerHTML = markup;
+    const actual = CaptionSourceReader.readVisibleCaption(player);
+    if (actual !== expected) {
+      failures += 1;
+      output.push(`FAIL ${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    } else output.push(`PASS ${label}`);
+  }
+  const speech = '<div class="caption-window"><span class="ytp-caption-segment">Real speech.</span></div>';
+  test("only the active player's caption windows are read", speech + '<span class="ytp-caption-segment">Player controls</span>', "Real speech.");
+  test("standalone startup language notice is excluded", speech + '<div class="caption-window"><span class="ytp-caption-segment">English (auto-generated) Click for settings</span></div>', "Real speech.");
+  test("an unpunctuated caption beside a notice is preserved", '<div class="caption-window"><span class="ytp-caption-segment">We are still speaking</span></div><div class="caption-window"><span class="ytp-caption-segment">English (auto-generated) Click for settings</span></div>', "We are still speaking");
+  test("regional language notice is excluded", speech + '<div class="caption-window"><span class="ytp-caption-segment">Portuguese (Brazil) (auto-generated) Click for settings</span></div>', "Real speech.");
+  test("notice split into adjacent segments is excluded", speech + '<div class="caption-window"><span class="ytp-caption-segment">English (auto-generated)</span><span class="ytp-caption-segment">Click for settings</span></div>', "Real speech.");
+  test("manual English track notice is excluded", speech + '<div class="caption-window"><span class="ytp-caption-segment">English</span><span class="ytp-caption-segment">Click for settings</span></div>', "Real speech.");
+  test("nested tooltip is excluded", '<div class="caption-window"><span class="ytp-caption-segment">Real <span role="tooltip">English (auto-generated) Click for settings</span>speech.</span></div>', "Real speech.");
+  test("unmarked nested notice is excluded", '<div class="caption-window"><span class="ytp-caption-segment">Real speech.<span>English (auto-generated) Click for settings</span></span></div>', "Real speech.");
+  test("an inseparable contaminated segment is discarded", '<div class="caption-window"><span class="ytp-caption-segment">Real speech. English (auto-generated) Click for settings</span></div>', "");
+  test("a hidden caption window is excluded", speech + '<div class="caption-window" style="opacity:0"><span class="ytp-caption-segment">Hidden duplicate</span></div>', "Real speech.");
+  test("an aria-hidden copy is excluded", speech + '<div class="caption-window" aria-hidden="true"><span class="ytp-caption-segment">Hidden duplicate</span></div>', "Real speech.");
+  test("hidden descendants are excluded", '<div class="caption-window"><span class="ytp-caption-segment">Real <span style="display:none">Hidden words</span>speech.</span></div>', "Real speech.");
+  test("nested styled segments are not read twice", '<div class="caption-window"><span class="ytp-caption-segment">Real <span class="ytp-caption-segment">speech.</span></span></div>', "Real speech.");
+  test("visual line breaks keep word boundaries", '<div class="caption-window"><span class="ytp-caption-segment">Real<br>speech.</span></div>', "Real speech.");
+  test("top-positioned real subtitles are still accepted", '<div class="caption-window ytp-caption-window-top"><span class="ytp-caption-segment">Real speech.</span></div>', "Real speech.");
+  test("ordinary dialogue mentioning UI words is preserved", '<div class="caption-window"><span class="ytp-caption-segment">I speak English. The button says Click for settings.</span></div>', "I speak English. The button says Click for settings.");
+  test("empty player does not read another player's subtitles", "", "");
+  document.documentElement.dataset.failures = String(failures);
+  document.querySelector("#results").textContent = `${output.join("\n")}\n${failures ? `${failures} failed` : "All tests passed"}`;
+</script>

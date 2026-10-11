@@ -32,6 +32,7 @@
   let lastTrackedCaption = "";
   let lastCaptionChangeAt = performance.now();
   let captionBlankSince = null;
+  let captionHistoryDiscarded = false;
   let timelinePrefetchedVideoId = "";
   let retryAction = "translate";
   let lastTranslatedCaption = "";
@@ -117,26 +118,13 @@
     );
   }
 
-  function isVisible(element) {
-    if (!element.getClientRects().length) {
-      return false;
-    }
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+  function readVisibleCaption() {
+    return CaptionSourceReader.readVisibleCaption(document.querySelector("#movie_player"));
   }
 
-  function readVisibleCaption() {
-    const parts = [];
-    for (const segment of document.querySelectorAll(".ytp-caption-segment")) {
-      if (!isVisible(segment)) {
-        continue;
-      }
-      const text = normalizeText(segment.textContent || "");
-      if (text && parts[parts.length - 1] !== text) {
-        parts.push(text);
-      }
-    }
-    return normalizeText(parts.join(" "));
+  function isSafeCaption(text) {
+    return typeof text === "string" && Boolean(normalizeText(text)) && text.length <= MAX_TRACKED_CAPTION_CHARS &&
+      !CaptionSentenceAssembler.hasCaptionArtifacts(text);
   }
 
   function clearLastTranslatedCaption() {
@@ -159,6 +147,7 @@
     lastTrackedCaption = "";
     lastCaptionChangeAt = performance.now();
     captionBlankSince = null;
+    captionHistoryDiscarded = false;
     timelinePrefetchedVideoId = "";
     clearLastTranslatedCaption();
     if (ui) {
@@ -200,10 +189,11 @@
     captionTracker.reset();
     lastTrackedCaption = "";
     captionBlankSince = null;
+    captionHistoryDiscarded = false;
   }
 
   function rememberCompletedCaption(caption) {
-    if (!caption || completedCaptions[completedCaptions.length - 1] === caption) {
+    if (!isSafeCaption(caption) || completedCaptions[completedCaptions.length - 1] === caption) {
       return;
     }
     completedCaptions.push(caption);
@@ -212,18 +202,12 @@
     }
   }
 
-  function boundTrackedCaption() {
+  function boundTrackedCaption(snapshot = lastTrackedCaption) {
     const text = normalizeText(captionTracker.activeText);
-    if (text.length <= MAX_TRACKED_CAPTION_CHARS) return;
-    let start = text.length - MAX_TRACKED_CAPTION_CHARS;
-    const boundary = text.slice(start).match(/[.!?。！？…][.!?。！？…]*["'”’）)\]}]*\s+/u);
-    if (boundary && boundary.index < 140) {
-      start += boundary.index + boundary[0].length;
-    } else {
-      const nextSpace = text.indexOf(" ", start);
-      if (nextSpace >= 0) start = nextSpace + 1;
-    }
-    captionTracker.activeText = normalizeText(text.slice(start));
+    if (!text || isSafeCaption(text)) return;
+    captionHistoryDiscarded = true;
+    captionTracker.reset();
+    if (isSafeCaption(snapshot)) captionTracker.push(snapshot);
   }
 
   function scanCaption() {
@@ -268,6 +252,7 @@
 
   function contextFor(current) {
     const useful = completedCaptions.filter((caption) => {
+      if (!isSafeCaption(caption)) return false;
       if (caption === current) {
         return false;
       }
@@ -757,6 +742,7 @@
   }
 
   function renderClickableCaption(text) {
+    text = isSafeCaption(text) ? text : "";
     ui.original.replaceChildren();
     ui.original.dataset.sentence = text;
     const parts = text.match(/[\p{L}\p{M}]+(?:['’\-][\p{L}\p{M}]+)*|[^\p{L}\p{M}]+/gu) || [text];
@@ -949,11 +935,16 @@
     }
 
     const trackerUpdate = captionTracker.push(current);
-    boundTrackedCaption();
+    boundTrackedCaption(current);
     for (const completed of trackerUpdate.completed) {
       rememberCompletedCaption(completed);
     }
-    const initial = CaptionSentenceAssembler.selectActiveSentence(current, captionTracker.activeText);
+    const initial = CaptionSentenceAssembler.selectActiveSentence(current, captionHistoryDiscarded ? "" : captionTracker.activeText);
+    if (!isSafeCaption(initial)) {
+      showError("检测到异常字幕内容，请等画面字幕更新后再试。");
+      return;
+    }
+    let recoveredCaption = captionHistoryDiscarded;
     showCollecting(initial);
 
     const fallbackCaptionPromise = video?.paused
@@ -962,7 +953,8 @@
     const timelineCaption = await requestTimelineCaption(initial, clickedTimeMs, current);
     if (sequence !== requestSequence) return;
     let collected;
-    if (timelineCaption?.text) {
+    const hasTimelineCaption = isSafeCaption(timelineCaption?.text || "");
+    if (hasTimelineCaption) {
       cancelCaptionCollection();
       collected = timelineCaption.text;
       updateCollectingPreview(timelineCaption.text);
@@ -973,14 +965,25 @@
     if (sequence !== requestSequence || !collected) {
       return;
     }
+    if (!isSafeCaption(collected)) {
+      collected = CaptionSentenceAssembler.selectActiveSentence(readVisibleCaption());
+      recoveredCaption = true;
+      captionTracker.reset();
+      if (!isSafeCaption(collected)) {
+        showError("检测到异常字幕内容，请等画面字幕更新后再试。");
+        return;
+      }
+    }
     const captionReadyAt = performance.now();
-    const captionSource = timelineCaption?.text ? "timeline" : "screen";
+    const captionSource = hasTimelineCaption ? "timeline" : "screen";
 
     const context = contextFor(collected);
     rememberCompletedCaption(collected);
-    const partialNotice = !timelineCaption?.text && !CaptionSentenceAssembler.endsSentence(collected)
-      ? "未能确认完整句，当前翻译的是已收集的字幕片段。可继续播放后重试。"
-      : "";
+    const partialNotice = !hasTimelineCaption && recoveredCaption
+      ? "检测到异常字幕历史，已改用当前画面字幕片段。可继续播放后重试。"
+      : !hasTimelineCaption && !CaptionSentenceAssembler.endsSentence(collected)
+        ? "未能确认完整句，当前翻译的是已收集的字幕片段。可继续播放后重试。"
+        : "";
     const pauseNotice = [pauseCurrentVideo(video), partialNotice].filter(Boolean).join(" ");
     const cacheKey = translationCacheKey(collected, context);
     const cached = forceRefresh ? null : readCachedTranslation(cacheKey);

@@ -6,7 +6,7 @@
   video { width: 100px; height: 60px; }
   #results { white-space: pre-wrap; }
 </style>
-<div id="movie_player"><video></video><span class="ytp-caption-segment"></span></div>
+<div id="movie_player"><video></video><div class="caption-window"><span class="ytp-caption-segment" id="speech"></span></div></div>
 <pre id="results">Running…</pre>
 <script>
   window.__youtubeCaptionTranslatorTestWatchPage = true;
@@ -45,6 +45,7 @@
   });
 </script>
 <script src="../extension/caption-assembler.js"></script>
+<script src="../extension/caption-reader.js"></script>
 <script src="../extension/display-settings.js"></script>
 <script src="../extension/content.js"></script>
 <script>
@@ -60,7 +61,7 @@
     if (actual !== expected) throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   };
   const caption = async (text) => {
-    document.querySelector(".ytp-caption-segment").textContent = text;
+    document.querySelector("#speech").textContent = text;
     await tick();
   };
   const ui = () => document.querySelector("#youtube-caption-translator-root").shadowRoot;
@@ -76,6 +77,7 @@
       requests.length = 0;
       timelineRequests.length = 0;
       Object.assign(state, { time: 3.5, paused: false, seeking: false, timeline: () => null });
+      document.querySelectorAll(".test-extra").forEach((element) => element.remove());
       await caption("");
       await run();
       passed.push(`PASS ${name}`);
@@ -172,7 +174,7 @@
     await test("track change removes untranslated history", async () => {
       await caption("Unfinished English words");
       window.postMessage({ channel: "youtube-caption-translator-timeline-v1", type: "caption-track-changed" }, location.origin);
-      document.querySelector(".ytp-caption-segment").textContent = "新的字幕。";
+      document.querySelector("#speech").textContent = "新的字幕。";
       await tick();
       click();
       await translated("新的字幕。", 1);
@@ -190,6 +192,63 @@
       await tick();
       await caption("");
       await translated("words without punctuation", 1);
+    });
+    await test("startup notice does not duplicate progressive captions or enter context", async () => {
+      const notice = document.createElement("div");
+      notice.className = "caption-window test-extra";
+      notice.innerHTML = '<span class="ytp-caption-segment">English (auto-generated)</span><span class="ytp-caption-segment">Click for settings</span>';
+      document.querySelector("#movie_player").appendChild(notice);
+      await caption("Everyone, this year's Nobel");
+      await caption("Everyone, this year's Nobel Prize");
+      click();
+      equal(ui().querySelector(".original").textContent, "Everyone, this year's Nobel Prize", "initial preview is clean");
+      await caption("Everyone, this year's Nobel Prize in physics has been announced.");
+      await translated("Everyone, this year's Nobel Prize in physics has been announced.", 1);
+      notice.remove();
+      state.paused = false;
+      await caption("Now we see the cosmos.");
+      click();
+      await translated("Now we see the cosmos.", 2);
+      equal(requests[1].context.join(" ").includes("Click for settings"), false, "context contains no notice");
+    });
+    await test("nested settings notice is excluded without losing rolling history", async () => {
+      await caption("we need to solve");
+      document.querySelector("#speech").innerHTML = 'to solve this problem<span role="tooltip">English (auto-generated) Click for settings</span>';
+      await tick();
+      click();
+      await tick();
+      await caption("this problem together.");
+      await translated("we need to solve this problem together.", 1);
+    });
+    await test("contaminated timeline response falls back to clean screen captions", async () => {
+      state.paused = true;
+      state.timeline = () => ({ text: "Clean dialogue. English (auto-generated) Click for settings" });
+      await caption("Clean dialogue.");
+      click();
+      await translated("Clean dialogue.", 1);
+    });
+    await test("oversized timeline response falls back without flooding the preview", async () => {
+      state.paused = true;
+      state.timeline = () => ({ text: "excessive ".repeat(300) });
+      await caption("Short clean dialogue.");
+      click();
+      await translated("Short clean dialogue.", 1);
+    });
+    await test("excessive unpunctuated history is discarded with a fragment notice", async () => {
+      state.paused = true;
+      await caption(`Earlier words ${"old ".repeat(280)}`);
+      await caption(`Another block ${"different ".repeat(110)}`);
+      await caption("The current clean fragment");
+      click();
+      await translated("The current clean fragment", 1);
+      equal(ui().querySelector(".notice").textContent.includes("异常字幕历史"), true, "history recovery notice");
+    });
+    await test("ordinary dialogue mentioning settings and English is preserved", async () => {
+      const text = 'I speak English. The button says Click for settings.';
+      state.paused = true;
+      await caption(text);
+      click();
+      await translated("The button says Click for settings.", 1);
     });
     document.documentElement.dataset.failures = String(failures.length);
     document.querySelector("#results").textContent = [...passed, ...failures.map((item) => `FAIL ${item}`),

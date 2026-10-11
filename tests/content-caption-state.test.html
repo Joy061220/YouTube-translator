@@ -5,7 +5,7 @@
   #movie_player { position: relative; width: 800px; height: 450px; }
   .ytp-caption-segment { display: inline; }
 </style>
-<div id="movie_player"><span class="ytp-caption-segment">The previous sentence is finished.</span></div>
+<div id="movie_player"><div class="caption-window"><span class="ytp-caption-segment">The previous sentence is finished.</span></div></div>
 <pre id="results">Running…</pre>
 <script>
   "use strict";
@@ -34,6 +34,7 @@
   };
 </script>
 <script src="../extension/caption-assembler.js"></script>
+<script src="../extension/caption-reader.js"></script>
 <script src="../extension/display-settings.js"></script>
 <script src="../extension/content.js"></script>
 <script>

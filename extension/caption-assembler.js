@@ -4,6 +4,8 @@
   const SENTENCE_END_RE = /[.!?。！？…][.!?。！？…]*["'”’）)\]}]*$/u;
   const EMBEDDED_SENTENCE_END_RE = /[.!?。！？…][.!?。！？…]*["'”’）)\]}]*(?=\s+\S)/gu;
   const WORD_RE = /[\u3040-\u30ff\u3400-\u9fff]|[\p{L}\p{M}\p{N}]+(?:['’\-][\p{L}\p{M}\p{N}]+)*/gu;
+  const CAPTION_NOTICE_RE = /^(?:English|Spanish|French|German|Italian|Portuguese|Russian|Japanese|Korean|Chinese|Arabic|Hindi|Dutch|Polish|Turkish|Vietnamese|Indonesian|Thai|Ukrainian)(?:\s*\([^()]{1,40}\)){0,2}\s*Click for settings[.!]?$/iu;
+  const CAPTION_ARTIFACT_RE = /(?:\(auto-generated\)|\bEnglish)\s*Click for settings\b/iu;
 
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -11,6 +13,14 @@
 
   function comparable(value) {
     return normalizeText(value).toLocaleLowerCase();
+  }
+
+  function isCaptionNotice(value) {
+    return CAPTION_NOTICE_RE.test(normalizeText(value));
+  }
+
+  function hasCaptionArtifacts(value) {
+    return CAPTION_ARTIFACT_RE.test(normalizeText(value));
   }
 
   function endsSentence(value) {
@@ -165,6 +175,9 @@
   function mergeCaptionText(currentValue, incomingValue) {
     const current = normalizeText(currentValue);
     const incoming = normalizeText(incomingValue);
+    // Reject a contaminated snapshot rather than deleting words from dialogue.
+    if (hasCaptionArtifacts(incoming)) return hasCaptionArtifacts(current) ? "" : current;
+    if (hasCaptionArtifacts(current)) return incoming;
     if (!current) return incoming;
     if (!incoming) return current;
 
@@ -234,8 +247,9 @@
   }
 
   function selectActiveSentence(snapshotValue, trackedValue = "") {
+    if (hasCaptionArtifacts(snapshotValue)) return "";
     const visible = splitEmbeddedSentences(snapshotValue).active;
-    const tracked = splitEmbeddedSentences(trackedValue).active;
+    const tracked = hasCaptionArtifacts(trackedValue) ? "" : splitEmbeddedSentences(trackedValue).active;
     if (!visible) return "";
     // Reuse the beginning collected before the click only when it belongs to
     // the visible tail. A completed carry-over prefix is never the target.
@@ -275,8 +289,8 @@
 
   class SentenceBuffer {
     constructor(seed = "", lastSnapshot = "") {
-      this.activeText = normalizeText(seed);
-      this.lastSnapshot = normalizeText(lastSnapshot || seed);
+      this.activeText = hasCaptionArtifacts(seed) ? "" : normalizeText(seed);
+      this.lastSnapshot = hasCaptionArtifacts(lastSnapshot || seed) ? "" : normalizeText(lastSnapshot || seed);
     }
 
     reset() {
@@ -288,6 +302,12 @@
       const snapshot = normalizeText(snapshotValue);
       const previousActive = this.activeText;
       const completed = [];
+
+      if (hasCaptionArtifacts(this.activeText)) this.reset();
+      if (hasCaptionArtifacts(snapshot)) {
+        this.reset();
+        return { active: "", completed, changed: Boolean(previousActive) };
+      }
 
       if (!snapshot) {
         this.lastSnapshot = "";
@@ -331,6 +351,8 @@
 
   const api = Object.freeze({
     normalizeText,
+    isCaptionNotice,
+    hasCaptionArtifacts,
     endsSentence,
     captionSettleDelay,
     captionCompletionDelay,

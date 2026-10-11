@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube 单句字幕翻译",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "收集并翻译完整的 YouTube 字幕句子，自动暂停视频并支持单词详解。",
   "host_permissions": [
     "http://127.0.0.1:8765/*"
@@ -29,6 +29,7 @@
       ],
       "js": [
         "caption-assembler.js",
+        "caption-reader.js",
         "display-settings.js",
         "content.js"
       ],
